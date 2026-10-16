@@ -31,6 +31,7 @@ class SearchQuery:
     price_to: int = 0
     operators: list[str | int] = field(default_factory=list)
     hotel_types: list[int] = field(default_factory=list)
+    services: list[str | int] = field(default_factory=list)
     only_charter: bool = True
     direct_flight: bool = False
     currency: int = 0  # 0 = RUB

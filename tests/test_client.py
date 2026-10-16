@@ -134,6 +134,60 @@ def test_sort_offers():
     assert [o.price for o in _sort_offers(offers, "rating")] == [150, 200, 100]
 
 
+def test_flatten_services_from_groups():
+    groups = [
+        {
+            "id": 3,
+            "name": "Пляж и расположение",
+            "childrens": [
+                {"id": 15, "name": "Первая линия", "popular": True},
+                {"id": 16, "name": "Свой пляж", "popular": True},
+            ],
+        },
+        {
+            "id": 5,
+            "name": "Услуги и территория",
+            "childrens": [{"id": 24, "name": "Бассейн с подогревом", "popular": False}],
+        },
+    ]
+    services = []
+    for group in groups:
+        for child in group["childrens"]:
+            services.append(
+                {
+                    "id": child["id"],
+                    "name": child["name"],
+                    "group": group["name"],
+                    "groupId": group["id"],
+                    "popular": child.get("popular", False),
+                }
+            )
+    assert {s["name"]: s["id"] for s in services}[ "Первая линия"] == 15
+    assert {s["name"]: s["id"] for s in services}["Бассейн с подогревом"] == 24
+    # _find_in resolves names case/ё-insensitively
+    assert TourvisorClient._find_in(services, "name", "первая линия")["id"] == 15
+    assert TourvisorClient._find_in(services, "name", "БАССЕЙН С ПОДОГРЕВОМ")["id"] == 24
+
+
+async def test_resolve_services(monkeypatch):
+    client = TourvisorClient(cache_dir="/tmp/nonexistent-cache")
+    fake = [
+        {"id": 15, "name": "Первая линия", "group": "Пляж и расположение", "groupId": 3},
+        {"id": 24, "name": "Бассейн с подогревом", "group": "Услуги и территория", "groupId": 5},
+        {"id": 25, "name": "Водные горки", "group": "Услуги и территория", "groupId": 5},
+    ]
+
+    async def fake_get_services(country_id):
+        return fake
+
+    monkeypatch.setattr(client, "get_services", fake_get_services)
+    assert await client.resolve_services(4, ["Первая линия", 24]) == [15, 24]
+    assert await client.resolve_services(4, ["водные горки"]) == [25]
+    assert await client.resolve_services(4, []) == []
+    with pytest.raises(TourvisorError):
+        await client.resolve_services(4, ["Несуществующий фильтр"])
+
+
 async def test_session_retry_on_auth_error(monkeypatch, tmp_path):
     """A stale session triggers one re-auth and a retry."""
     client = TourvisorClient(cache_dir=tmp_path / "c")

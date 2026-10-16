@@ -247,6 +247,43 @@ class TourvisorClient:
 
         return await self._cached(f"hotel_types_{country_id}", fetch)
 
+    async def get_service_groups(self, country_id: int) -> list[dict[str, Any]]:
+        """Return the extended-filter groups (beach, services, kids, ...).
+
+        Each group has ``id``/``name`` and a ``childrens`` list whose entries
+        carry the ``id`` passed to the search ``services`` parameter.
+        """
+
+        async def fetch() -> list[dict[str, Any]]:
+            data = await self._request_json(
+                f"{BASE_URL}/api/v1.2/hotel-service-groups/all",
+                params={
+                    "sortDir": "desc",
+                    "sortProp": "order",
+                    "countryId": country_id,
+                },
+            )
+            return data if isinstance(data, list) else []
+
+        return await self._cached(f"service_groups_{country_id}", fetch)
+
+    async def get_services(self, country_id: int) -> list[dict[str, Any]]:
+        """Flatten :meth:`get_service_groups` into a flat list of services."""
+        groups = await self.get_service_groups(country_id)
+        services: list[dict[str, Any]] = []
+        for group in groups:
+            for child in group.get("childrens", []) or []:
+                services.append(
+                    {
+                        "id": child.get("id"),
+                        "name": child.get("name"),
+                        "group": group.get("name"),
+                        "groupId": group.get("id"),
+                        "popular": child.get("popular", False),
+                    }
+                )
+        return services
+
     # ------------------------------------------------------------------
     # Name -> id resolution
     # ------------------------------------------------------------------
@@ -339,6 +376,27 @@ class TourvisorClient:
         if key in MEAL_ALIASES:
             return MEAL_ALIASES[key]
         raise TourvisorError(f"Unknown meal type: {value!r}")
+
+    async def resolve_services(
+        self, country_id: int, values: list[str | int]
+    ) -> list[int]:
+        """Resolve extended-filter names (e.g. "Первая линия") to service ids."""
+        if not values:
+            return []
+        resolved: list[int] = []
+        need_names = [
+            v for v in values if not (isinstance(v, int) or str(v).isdigit())
+        ]
+        services = await self.get_services(country_id) if need_names else []
+        for value in values:
+            if isinstance(value, int) or (isinstance(value, str) and str(value).isdigit()):
+                resolved.append(int(value))
+                continue
+            match = self._find_in(services, "name", str(value))
+            if not match:
+                raise TourvisorError(f"Service not found: {value!r}")
+            resolved.append(int(match["id"]))
+        return list(dict.fromkeys(resolved))
 
     # ------------------------------------------------------------------
     # Search flow

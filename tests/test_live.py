@@ -83,3 +83,37 @@ async def test_live_search_with_explicit_hotel(client: TourvisorClient):
     assert payload["total_found"] > 0
     names = {offer["hotel_name"] for offer in payload["offers"]}
     assert any("AKKA ALINDA" in name.upper() for name in names)
+
+
+async def test_live_services_reference(client: TourvisorClient):
+    turkey = await client.resolve_country("Турция")
+    services = await client.get_services(turkey)
+    names = {s["name"]: s["id"] for s in services}
+    assert names.get("Первая линия") == 15
+    assert names.get("Бассейн с подогревом") == 24
+    assert names.get("Водные горки") == 25
+
+
+async def test_live_services_filter_narrows_results(client: TourvisorClient):
+    """Adding an extended filter must not increase the number of results."""
+    base = SearchQuery(
+        date_from="2026-11-24",
+        date_to="2026-11-30",
+        country="Турция",
+        departure_city="Екатеринбург",
+        resorts=["Кемер"],
+        stars=5,
+        adults=2,
+        children_ages=[8],
+        nights_from=6,
+        nights_to=8,
+        only_charter=False,
+    )
+    plain = await run_search(client, base, limit=1)
+
+    filtered_query = SearchQuery(**{**base.to_dict(), "services": ["Первая линия"]})
+    filtered = await run_search(client, filtered_query, limit=1)
+
+    assert plain["finished"] and filtered["finished"]
+    assert plain["total_found"] > 0
+    assert filtered["total_found"] <= plain["total_found"]

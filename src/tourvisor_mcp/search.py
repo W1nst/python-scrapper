@@ -64,7 +64,16 @@ async def run_search(
         params["operators"] = ",".join(operators)
     if query.hotel_types:
         params["services"] = ",".join(str(s) for s in query.hotel_types)
-
+    if query.services:
+        # Extended filters ("Первая линия", "Бассейн с подогревом", ...) are
+        # passed through the same ``services`` parameter; combine with any
+        # hotel-type ids already set.
+        service_ids = await client.resolve_services(country_id, query.services)
+        if service_ids:
+            existing = params.get("services")
+            parts = [existing] if existing else []
+            parts.append(",".join(str(s) for s in service_ids))
+            params["services"] = ",".join(parts)
     start, final = await client.search_raw(params)
     offers = client.normalise(final)
     offers = _sort_offers(offers, sort)

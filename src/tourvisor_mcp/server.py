@@ -50,6 +50,7 @@ async def resolve_filters(
     hotel: str | None = None,
     departure_city: str | None = None,
     meal: str | None = None,
+    services: list[str] | None = None,
 ) -> str:
     """Resolve human-readable filter values into Tourvisor ids.
 
@@ -59,6 +60,8 @@ async def resolve_filters(
         hotel: Hotel name or id, e.g. "Akka Alinda".
         departure_city: Departure city name or id, e.g. "Москва".
         meal: Meal type, e.g. "AI", "UAI", "HB", "BB", "RO", "OB", "FB".
+        services: Extended filters, e.g. ["Первая линия", "Бассейн с подогревом",
+            "Водные горки", "Мини-клуб"]. Names come from list_reference(kind="services").
 
     Returns a JSON object with the resolved ids.
     """
@@ -80,6 +83,10 @@ async def resolve_filters(
             result["hotel_ids"] = await _client.resolve_hotels(country_id, [hotel])
         if meal is not None:
             result["meal_id"] = _client.resolve_meal(meal)
+        if services is not None:
+            if country_id is None:
+                raise TourvisorError("`country` is required to resolve services")
+            result["service_ids"] = await _client.resolve_services(country_id, services)
         result["available_meals"] = MEAL_ALIASES
         return json.dumps(result, ensure_ascii=False)
     except Exception as exc:  # noqa: BLE001 - surfaced to the agent
@@ -104,6 +111,7 @@ async def search_tours(
     price_from: int = 0,
     price_to: int = 0,
     operators: list[str] | None = None,
+    services: list[str] | None = None,
     only_charter: bool = True,
     direct_flight: bool = False,
     sort: str = "price",
@@ -129,6 +137,10 @@ async def search_tours(
         price_from: Minimum price in RUB.
         price_to: Maximum price in RUB.
         operators: Operator names or ids to restrict, e.g. ["Anex"].
+        services: Extended hotel filters, e.g. ["Первая линия", "Свой пляж",
+            "Бассейн с подогревом", "Водные горки", "Мини-клуб", "Семейный"].
+            Use list_reference(kind="services") to see all available names.
+            Note: Tourvisor applies these only together with resort filters.
         only_charter: Keep only charter flights (recommended).
         direct_flight: Keep only direct flights.
         sort: "price" (default), "price_desc" or "rating".
@@ -154,6 +166,7 @@ async def search_tours(
             price_from=price_from,
             price_to=price_to,
             operators=operators or [],
+            services=services or [],
             only_charter=only_charter,
             direct_flight=direct_flight,
         )
@@ -172,9 +185,9 @@ async def list_reference(
 
     Args:
         kind: One of "countries", "departures", "regions", "subregions",
-            "hotels", "hotel_types", "meals".
+            "hotels", "hotel_types", "services", "service_groups", "meals".
         country: Country name or id — required for "regions", "subregions",
-            "hotels" and "hotel_types".
+            "hotels", "hotel_types", "services" and "service_groups".
 
     Returns a JSON array of reference entries.
     """
@@ -185,7 +198,14 @@ async def list_reference(
             data = await _client.get_departures()
         elif kind == "meals":
             data = [{"id": v, "name": k} for k, v in MEAL_ALIASES.items()]
-        elif kind in {"regions", "subregions", "hotels", "hotel_types"}:
+        elif kind in {
+            "regions",
+            "subregions",
+            "hotels",
+            "hotel_types",
+            "services",
+            "service_groups",
+        }:
             if country is None:
                 raise TourvisorError(f"`country` is required for kind={kind!r}")
             country_id = await _client.resolve_country(country)
@@ -195,12 +215,16 @@ async def list_reference(
                 data = await _client.get_subregions(country_id)
             elif kind == "hotels":
                 data = await _client.get_hotels(country_id)
-            else:
+            elif kind == "hotel_types":
                 data = await _client.get_hotel_types(country_id)
+            elif kind == "services":
+                data = await _client.get_services(country_id)
+            else:
+                data = await _client.get_service_groups(country_id)
         else:
             raise TourvisorError(
                 "Unknown kind. Use one of: countries, departures, regions, "
-                "subregions, hotels, hotel_types, meals."
+                "subregions, hotels, hotel_types, services, service_groups, meals."
             )
         return json.dumps(data, ensure_ascii=False)
     except Exception as exc:  # noqa: BLE001 - surfaced to the agent
