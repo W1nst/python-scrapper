@@ -13,9 +13,28 @@ from typing import Any
 
 from .client import MEAL_ALIASES, TourvisorClient, TourvisorError
 from .models import SearchQuery
+from .rate_limit import RateLimiter
 from .search import run_search
 
 _client = TourvisorClient()
+
+# Guard the (rate-limited) search endpoint: at most 6 searches per minute.
+# Tourvisor answers rapidly repeated searches with 401/403 and an agent would
+# otherwise retry in a tight loop for minutes.
+_search_limiter = RateLimiter(max_calls=6, period=60.0)
+
+
+def _error_payload(message: str, *, retryable: bool, retry_after: float | None = None) -> str:
+    """Build a JSON error that tells the agent whether to retry."""
+    payload: dict[str, Any] = {"error": message, "retryable": retryable}
+    if retry_after is not None:
+        payload["retry_after_seconds"] = round(retry_after)
+    if not retryable:
+        payload["hint"] = (
+            "Do not call this tool again in the same turn; report this to the "
+            "user and wait for a new request."
+        )
+    return json.dumps(payload, ensure_ascii=False)
 
 
 async def resolve_filters(
@@ -81,6 +100,14 @@ async def search_tours(
     limit: int = 20,
 ) -> str:
     """Run a tour search and return normalised offers (JSON string)."""
+    wait = await _search_limiter.acquire()
+    if wait > 0:
+        return _error_payload(
+            "Too many tour searches were requested in a short time. "
+            "Tourvisor rate-limits the search endpoint.",
+            retryable=True,
+            retry_after=wait,
+        )
     try:
         query = SearchQuery(
             date_from=date_from,
@@ -105,8 +132,12 @@ async def search_tours(
         )
         payload = await run_search(_client, query, sort=sort, limit=limit)
         return json.dumps(payload, ensure_ascii=False)
+    except TourvisorError as exc:
+        # Auth/rate-limit failures are not worth retrying immediately; a retry
+        # would keep Tourvisor (and the agent) in a loop.
+        return _error_payload(str(exc), retryable=False)
     except Exception as exc:  # noqa: BLE001 - surfaced to the agent
-        return json.dumps({"error": str(exc)}, ensure_ascii=False)
+        return _error_payload(str(exc), retryable=False)
 
 
 async def list_reference(*, kind: str, country: str | None = None) -> str:

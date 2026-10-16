@@ -126,26 +126,58 @@ class TourvisorClient:
             params.setdefault("referrer", REFERRER)
             params["session"] = session
             resp = await client.get(url, params=params)
-            resp.raise_for_status()
-            try:
-                data = resp.json()
-            except json.JSONDecodeError as exc:  # pragma: no cover - defensive
-                raise TourvisorError(f"Invalid JSON from {url}: {resp.text[:200]!r}") from exc
 
-            error = data.get("error") if isinstance(data, dict) else None
-            if error and str(error.get("errormessage", "")).lower().startswith("authorisation"):
+            # Tourvisor signals an expired/invalid session either as an HTTP
+            # 401 (newer behaviour, body {"message": "Invalid session"}) or as
+            # a 200 with an ``error.errormessage`` of "Authorisation Error.".
+            # Both cases are handled by refreshing the session key once.
+            if resp.status_code in (401, 403) or self._is_auth_error(resp):
                 if retry_auth:
                     await self._get_session(client, force=True)
                     return await self._request_json(
                         url, params=params, client=client, retry_auth=False
                     )
-                raise TourvisorError(str(error))
+                raise TourvisorError(
+                    "Tourvisor rejected the search session (401/403). "
+                    "This usually means the request was rate-limited, the "
+                    "server IP is temporarily blocked, or too many searches "
+                    "were issued in a short time. Please wait a minute and "
+                    "retry a single search."
+                )
+
+            resp.raise_for_status()
+            try:
+                data = resp.json()
+            except json.JSONDecodeError as exc:
+                raise TourvisorError(f"Invalid JSON from {url}: {resp.text[:200]!r}") from exc
+
+            error = data.get("error") if isinstance(data, dict) else None
             if error:
-                raise TourvisorError(str(error))
+                message = str(error.get("errormessage") or error)
+                raise TourvisorError(message)
             return data
         finally:
             if owns_client:
                 await client.aclose()
+
+    @staticmethod
+    def _is_auth_error(resp: "httpx.Response") -> bool:
+        """Detect a 200-status body that actually carries an auth error."""
+        if resp.status_code != 200:
+            return False
+        try:
+            data = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        error = data.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("errormessage", ""))
+            if message.lower().startswith("authorisation"):
+                return True
+        message = str(data.get("message", ""))
+        return "invalid session" in message.lower()
 
     # ------------------------------------------------------------------
     # Reference data

@@ -189,7 +189,7 @@ async def test_resolve_services(monkeypatch):
 
 
 async def test_session_retry_on_auth_error(monkeypatch, tmp_path):
-    """A stale session triggers one re-auth and a retry."""
+    """A stale session (200 + authorisation error) triggers one re-auth."""
     client = TourvisorClient(cache_dir=tmp_path / "c")
     calls = {"sessions": 0, "get": 0}
 
@@ -203,7 +203,6 @@ async def test_session_retry_on_auth_error(monkeypatch, tmp_path):
         return httpx.Response(200, json={"ok": True})
 
     transport = httpx.MockTransport(handler)
-    # Patch httpx.AsyncClient so the handler is used inside _request_json.
     real_client = httpx.AsyncClient
 
     def factory(*args, **kwargs):
@@ -214,3 +213,82 @@ async def test_session_retry_on_auth_error(monkeypatch, tmp_path):
     data = await client._request_json("https://tourvisor.ru/xml/modsearch.php")
     assert data == {"ok": True}
     assert calls["sessions"] == 2  # initial + forced refresh
+
+
+async def test_http_401_triggers_single_reauth(monkeypatch, tmp_path):
+    """An HTTP 401 ("Invalid session") also triggers exactly one re-auth."""
+    client = TourvisorClient(cache_dir=tmp_path / "c")
+    calls = {"sessions": 0, "get": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/sessions"):
+            calls["sessions"] += 1
+            return httpx.Response(200, json={"k": f"key-{calls['sessions']}"})
+        calls["get"] += 1
+        if calls["get"] == 1:
+            return httpx.Response(401, json={"message": "Invalid session", "error": {}})
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    data = await client._request_json("https://tourvisor.ru/xml/modsearch.php")
+    assert data == {"ok": True}
+    assert calls["sessions"] == 2
+
+
+async def test_http_401_persistent_raises_without_looping(monkeypatch, tmp_path):
+    """Persistent 401 raises a clear error instead of retrying forever."""
+    client = TourvisorClient(cache_dir=tmp_path / "c")
+    calls = {"get": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/sessions"):
+            return httpx.Response(200, json={"k": "key"})
+        calls["get"] += 1
+        return httpx.Response(401, json={"message": "Invalid session", "error": {}})
+
+    transport = httpx.MockTransport(handler)
+    real_client = httpx.AsyncClient
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    with pytest.raises(TourvisorError) as excinfo:
+        await client._request_json("https://tourvisor.ru/xml/modsearch.php")
+    assert "401" in str(excinfo.value) or "session" in str(excinfo.value).lower()
+    assert calls["get"] == 2  # original + one retry, then stop
+
+
+async def test_is_auth_error_detection():
+    class R:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    assert TourvisorClient._is_auth_error(R(200, {"message": "Invalid session"}))
+    assert TourvisorClient._is_auth_error(
+        R(200, {"error": {"errormessage": "Authorisation Error."}})
+    )
+    assert not TourvisorClient._is_auth_error(R(200, {"result": {}}))
+    assert not TourvisorClient._is_auth_error(R(401, {"message": "Invalid session"}))
+
+
+async def test_search_rate_limiter_blocks_burst():
+    from tourvisor_mcp.rate_limit import RateLimiter
+
+    limiter = RateLimiter(max_calls=2, period=60.0)
+    assert await limiter.acquire() == 0.0
+    assert await limiter.acquire() == 0.0
+    wait = await limiter.acquire()
+    assert wait > 0
