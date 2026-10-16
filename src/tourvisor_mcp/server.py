@@ -1,30 +1,16 @@
 """FastMCP server exposing three tour-search tools backed by tourvisor.ru.
 
-Tools
------
-``resolve_filters``
-    Translate human names ("Kemer", "Turkey", "Moscow", "all inclusive") into
-    the numeric ids Tourvisor expects.
-
-``search_tours``
-    Run a full tour search from a human-friendly query and return normalised
-    offers.
-
-``list_reference``
-    Dump a reference list (countries / resorts / departures / meal types) so
-    the calling agent can ask clarifying questions.
+This module uses the full FastMCP framework and is convenient on normal
+machines.  On resource-constrained hosts where the MCP SDK import time exceeds
+the client's connect deadline, use :mod:`tourvisor_mcp.stdio_server` instead —
+it exposes the identical tools with a much faster start-up.
 """
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
 from fastmcp import FastMCP
 
-from .client import MEAL_ALIASES, TourvisorClient, TourvisorError
-from .models import SearchQuery
-from .search import run_search
+from . import tools as _tools
 
 mcp = FastMCP(
     name="tourvisor",
@@ -35,12 +21,6 @@ mcp = FastMCP(
         "endpoints, so results may be rate-limited."
     ),
 )
-
-_client = TourvisorClient()
-
-
-def _error(exc: Exception) -> str:
-    return json.dumps({"error": str(exc)}, ensure_ascii=False)
 
 
 @mcp.tool
@@ -60,37 +40,18 @@ async def resolve_filters(
         hotel: Hotel name or id, e.g. "Akka Alinda".
         departure_city: Departure city name or id, e.g. "Москва".
         meal: Meal type, e.g. "AI", "UAI", "HB", "BB", "RO", "OB", "FB".
-        services: Extended filters, e.g. ["Первая линия", "Бассейн с подогревом",
-            "Водные горки", "Мини-клуб"]. Names come from list_reference(kind="services").
+        services: Extended filters, e.g. ["Первая линия", "Бассейн с подогревом"].
 
     Returns a JSON object with the resolved ids.
     """
-    try:
-        result: dict[str, Any] = {}
-        country_id: int | None = None
-        if country is not None:
-            country_id = await _client.resolve_country(country)
-            result["country_id"] = country_id
-        if departure_city is not None:
-            result["departure_id"] = await _client.resolve_departure(departure_city)
-        if resort is not None:
-            if country_id is None:
-                raise TourvisorError("`country` is required to resolve a resort")
-            result["resort_ids"] = await _client.resolve_resorts(country_id, [resort])
-        if hotel is not None:
-            if country_id is None:
-                raise TourvisorError("`country` is required to resolve a hotel")
-            result["hotel_ids"] = await _client.resolve_hotels(country_id, [hotel])
-        if meal is not None:
-            result["meal_id"] = _client.resolve_meal(meal)
-        if services is not None:
-            if country_id is None:
-                raise TourvisorError("`country` is required to resolve services")
-            result["service_ids"] = await _client.resolve_services(country_id, services)
-        result["available_meals"] = MEAL_ALIASES
-        return json.dumps(result, ensure_ascii=False)
-    except Exception as exc:  # noqa: BLE001 - surfaced to the agent
-        return _error(exc)
+    return await _tools.resolve_filters(
+        country=country,
+        resort=resort,
+        hotel=hotel,
+        departure_city=departure_city,
+        meal=meal,
+        services=services,
+    )
 
 
 @mcp.tool
@@ -123,12 +84,11 @@ async def search_tours(
         date_from: Departure window start, ISO (YYYY-MM-DD) or DD.MM.YYYY.
         date_to: Departure window end.
         country: Country name or id, e.g. "Турция".
-        resorts: Resort/region names, e.g. ["Кемер", "Белек"]. The city "Кемер"
-            is a region; "Кемер - центр"/"Бельдиби" are subregions.
+        resorts: Resort/region names, e.g. ["Кемер", "Белек"].
         hotels: Optional explicit hotel names or ids to restrict the search.
         departure_city: Departure city, e.g. "Москва".
         stars: Hotel class 1-5.
-        rating: Minimum hotel rating, e.g. 4 (Tourvisor stores ratings >= 3).
+        rating: Minimum hotel rating, e.g. 4.
         meal: Meal type: AI, UAI, HB, FB, BB, RO, OB.
         adults: Number of adults.
         children_ages: Ages of children, e.g. [5].
@@ -137,10 +97,9 @@ async def search_tours(
         price_from: Minimum price in RUB.
         price_to: Maximum price in RUB.
         operators: Operator names or ids to restrict, e.g. ["Anex"].
-        services: Extended hotel filters, e.g. ["Первая линия", "Свой пляж",
-            "Бассейн с подогревом", "Водные горки", "Мини-клуб", "Семейный"].
+        services: Extended hotel filters, e.g. ["Первая линия", "Водные горки"].
             Use list_reference(kind="services") to see all available names.
-            Note: Tourvisor applies these only together with resort filters.
+            Tourvisor applies these only together with resort filters.
         only_charter: Keep only charter flights (recommended).
         direct_flight: Keep only direct flights.
         sort: "price" (default), "price_desc" or "rating".
@@ -148,39 +107,33 @@ async def search_tours(
 
     Returns a JSON object with ``offers`` plus search metadata.
     """
-    try:
-        query = SearchQuery(
-            date_from=date_from,
-            date_to=date_to,
-            country=country,
-            resorts=resorts or [],
-            hotels=hotels or [],
-            departure_city=departure_city,
-            stars=stars,
-            rating=rating,
-            meal=meal,
-            adults=adults,
-            children_ages=children_ages or [],
-            nights_from=nights_from,
-            nights_to=nights_to,
-            price_from=price_from,
-            price_to=price_to,
-            operators=operators or [],
-            services=services or [],
-            only_charter=only_charter,
-            direct_flight=direct_flight,
-        )
-        payload = await run_search(_client, query, sort=sort, limit=limit)
-        return json.dumps(payload, ensure_ascii=False)
-    except Exception as exc:  # noqa: BLE001 - surfaced to the agent
-        return _error(exc)
+    return await _tools.search_tours(
+        date_from=date_from,
+        date_to=date_to,
+        country=country,
+        resorts=resorts,
+        hotels=hotels,
+        departure_city=departure_city,
+        stars=stars,
+        rating=rating,
+        meal=meal,
+        adults=adults,
+        children_ages=children_ages,
+        nights_from=nights_from,
+        nights_to=nights_to,
+        price_from=price_from,
+        price_to=price_to,
+        operators=operators,
+        services=services,
+        only_charter=only_charter,
+        direct_flight=direct_flight,
+        sort=sort,
+        limit=limit,
+    )
 
 
 @mcp.tool
-async def list_reference(
-    kind: str,
-    country: str | None = None,
-) -> str:
+async def list_reference(kind: str, country: str | None = None) -> str:
     """Return a Tourvisor reference list so the agent can offer choices.
 
     Args:
@@ -191,44 +144,7 @@ async def list_reference(
 
     Returns a JSON array of reference entries.
     """
-    try:
-        if kind == "countries":
-            data = await _client.get_countries()
-        elif kind == "departures":
-            data = await _client.get_departures()
-        elif kind == "meals":
-            data = [{"id": v, "name": k} for k, v in MEAL_ALIASES.items()]
-        elif kind in {
-            "regions",
-            "subregions",
-            "hotels",
-            "hotel_types",
-            "services",
-            "service_groups",
-        }:
-            if country is None:
-                raise TourvisorError(f"`country` is required for kind={kind!r}")
-            country_id = await _client.resolve_country(country)
-            if kind == "regions":
-                data = await _client.get_regions(country_id)
-            elif kind == "subregions":
-                data = await _client.get_subregions(country_id)
-            elif kind == "hotels":
-                data = await _client.get_hotels(country_id)
-            elif kind == "hotel_types":
-                data = await _client.get_hotel_types(country_id)
-            elif kind == "services":
-                data = await _client.get_services(country_id)
-            else:
-                data = await _client.get_service_groups(country_id)
-        else:
-            raise TourvisorError(
-                "Unknown kind. Use one of: countries, departures, regions, "
-                "subregions, hotels, hotel_types, services, service_groups, meals."
-            )
-        return json.dumps(data, ensure_ascii=False)
-    except Exception as exc:  # noqa: BLE001 - surfaced to the agent
-        return _error(exc)
+    return await _tools.list_reference(kind=kind, country=country)
 
 
 def main() -> None:

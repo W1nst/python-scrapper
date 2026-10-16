@@ -18,6 +18,7 @@ dev = [
 
 [project.scripts]
 tourvisor-mcp = "tourvisor_mcp.server:main"
+tourvisor-mcp-lite = "tourvisor_mcp.stdio_server:main"
 
 [build-system]
 requires = ["setuptools>=68"]
